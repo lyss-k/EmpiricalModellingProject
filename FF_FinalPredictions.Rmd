@@ -1,0 +1,105 @@
+---
+title: "FF_FinalPredictions"
+author: "2d Lt Lyssa White"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(caret)
+library(ggplot2)
+library(xlsx)
+library(dplyr)
+library(tidyr)
+library(car)        # For VIF (Variance Inflation Factor)
+library(leaps)      # For stepwise selection
+library(MASS)       # For stepwise AIC/BIC
+library(caret) 
+library(knitr)
+library(kableExtra)
+library(corrplot)
+library(reshape2)
+library(MuMIn)
+```
+
+```{r}
+#read in data
+qb_predictions <- read.csv("qb_predictions.csv")
+rb_predictions <- read.csv("rb_predictions.csv")
+wr_predictions <- read.csv("wr_predictions.csv")
+te_predictions <- read.csv("te_predictions.csv")
+```
+
+Let's merge them all and see what top 20 looks like
+```{r}
+predictions2024 <- rbind(qb_predictions, rb_predictions, wr_predictions, te_predictions)
+sorted_preds <- predictions2024 %>% arrange(desc(predictions2024$predicted_fpts_2024))
+```
+
+```{r}
+head(sorted_preds, 25)
+```
+We don't see a ton of QBs in top 20, usually their higher scoring so this tells us our model is under-estimating points for QBs but that's okay. We can look at the QB data separately to determine which to pick when we get to that point, but QB wasn't going to be our first or second choice anyway.
+
+First choice: CeeDee Lamb
+20th choice (pending 2-19 were taken): Evan Engram
+
+# overall accuracy
+
+
+```{r}
+#scatterplot of actual vs predicted fantasy points
+ggplot(sorted_preds, aes(x = `X2024_fpts.g`, y = `predicted_fpts_2024`, color = position)) +
+  geom_point(size = 3, alpha = 0.8) +  # Scatter points colored by position
+  geom_smooth(method = "lm", se = FALSE) +  # Separate regression lines per position
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +  # Perfect prediction line
+  labs(title = "Predicted vs. Actual Fantasy Points per Game",
+       x = "Actual FPPG",
+       y = "Predicted FPPG",
+       color = "Position") +  # Legend title
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+```{r}
+sorted_actual <- predictions2024 %>% filter(predictions2024$position != "QB") %>% arrange(desc(`X2024_fpts.g`))
+head(sorted_actual, 50)
+```
+
+```{r}
+top_20_preds <- tolower(trimws(sorted_preds$name[1:20]))  
+top_20_actual <- tolower(trimws(sorted_actual$name[1:20]))
+
+matching_players <- intersect(top_20_preds, top_20_actual)
+print(matching_players)
+```
+```{r}
+# Count the number of correct predictions within ±2 points
+correct_predictions <- sum(abs(predictions2024$`predicted_fpts_2024` - predictions2024$`X2024_fpts.g`) <= 3)
+
+# Calculate accuracy as a percentage
+accuracy <- (correct_predictions / nrow(predictions2024)) * 100
+
+# Print the accuracy
+print(paste("Accuracy within ±3 fantasy points:", round(accuracy, 2), "%"))
+```
+```{r}
+library(dplyr)
+
+# Calculate accuracy for each position
+position_accuracy <- predictions2024 %>%
+  group_by(position) %>%
+  summarise(
+    total_players = n(),  # Count players per position
+    correct_predictions = sum(abs(`predicted_fpts_2024` - `X2024_fpts.g`) <= 3Indiv),  # Count correct predictions
+    accuracy = (correct_predictions / total_players) * 100  # Compute accuracy percentage
+  )
+
+# Print the accuracy table
+print(position_accuracy)
+```
+
+
+

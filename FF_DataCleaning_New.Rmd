@@ -1,0 +1,601 @@
+---
+title: "Fantasy Football Regression Analysis"
+author: "2d Lt Lyssa White"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(caret)
+library(ggplot2)
+library(xlsx)
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+#function to clean QB data
+read_and_clean_sheet_QB <- function(file_path, sheet_name) {
+  # Read the sheet WITHOUT column names so we can manually set them
+  data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+  
+  # Set first row as column names
+  col_names <- as.character(data[2, ])  # Convert second row to character column names
+  data <- data[-c(1,2), ]  # Remove first and second row since it's now the column names
+  
+  # Define which columns to rename
+  passing_cols <- 6:13   # Adjust these indices if needed
+  rushing_cols <- 14:17  # Adjust these indices if needed
+  
+  # Rename passing columns
+  col_names[passing_cols] <- paste0("Passing_", col_names[passing_cols])
+  
+  # Rename rushing columns
+  col_names[rushing_cols] <- paste0("Rushing_", col_names[rushing_cols])
+  
+  # Assign new column names
+  colnames(data) <- col_names
+  
+  # Ensure that the columns exist before removing them
+  cols_to_remove <- c("TEAM", "POS", "FPTS")
+  cols_to_remove <- cols_to_remove[cols_to_remove %in% colnames(data)]  # Keep only existing columns
+
+  # Drop unwanted columns
+  data <- data %>% dplyr::select(-all_of(cols_to_remove))
+  
+  # Convert numeric columns back (since they become characters after renaming)
+  data <- type_convert(data)
+  
+  return(data)
+}
+```
+
+```{r}
+#function to clean data, sets correct col names
+read_and_clean_sheet_RB <- function(file_path, sheet_name) {
+  # Read the sheet WITHOUT column names so we can manually set them
+  data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+  
+  # Set first row as column names
+  col_names <- as.character(data[2, ])  # Convert second row to character column names
+  data <- data[-c(1,2), ]  # Remove first and second row since it's now the column names
+  
+  # Define which columns to rename
+  rushing_cols <- 6:9  # Adjust these indices if needed
+  recieving_cols <- 10:13
+  fumbles_cols <- 15
+  
+  # Rename rushing columns
+  col_names[rushing_cols] <- paste0("Rushing_", col_names[rushing_cols])
+  col_names[recieving_cols] <- paste0("Receiving_", col_names[recieving_cols])
+  col_names[fumbles_cols] <- paste0("Fumbles_", col_names[fumbles_cols])
+  
+  # Assign new column names
+  colnames(data) <- col_names
+  
+  # Ensure that the columns exist before removing them
+  cols_to_remove <- c("TEAM", "POS", "FPTS")
+  cols_to_remove <- cols_to_remove[cols_to_remove %in% colnames(data)]  # Keep only existing columns
+
+  # Drop unwanted columns
+  data <- data %>% dplyr::select(-all_of(cols_to_remove))
+  
+  # Convert numeric columns back (since they become characters after renaming)
+  data <- type_convert(data)
+  
+  return(data)
+}
+```
+
+```{r}
+#function to clean data, sets correct col names
+read_and_clean_sheet_WR <- function(file_path, sheet_name) {
+  # Read the sheet WITHOUT column names so we can manually set them
+  data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+  
+  # Set first row as column names
+  col_names <- as.character(data[2, ])  # Convert second row to character column names
+  data <- data[-c(1,2), ]  # Remove first and second row since it's now the column names
+  
+  # Define which columns to rename
+  recieving_cols <- 6:13  # Adjust these indices if needed
+  rushing_cols <- 14:17
+  fumbles_cols <- 19
+  
+  # Rename columns
+  col_names[recieving_cols] <- paste0("Receiving_", col_names[recieving_cols])
+  col_names[rushing_cols] <- paste0("Rushing_", col_names[rushing_cols])
+  col_names[fumbles_cols] <- paste0("Fumbles_", col_names[fumbles_cols])
+  
+  # Assign new column names
+  colnames(data) <- col_names
+  
+  # Ensure that the columns exist before removing them
+  cols_to_remove <- c("TEAM", "POS", "FPTS")
+  cols_to_remove <- cols_to_remove[cols_to_remove %in% colnames(data)]  # Keep only existing columns
+
+  # Drop unwanted columns
+  data <- data %>% dplyr::select(-all_of(cols_to_remove))
+  
+  # Convert numeric columns back (since they become characters after renaming)
+  data <- type_convert(data)
+  
+  return(data)
+}
+```
+
+```{r}
+#function to clean data, sets correct col names
+read_and_clean_sheet_TE <- function(file_path, sheet_name) {
+  # Read the sheet WITHOUT column names so we can manually set them
+  data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+  
+  # Set first row as column names
+  col_names <- as.character(data[2, ])  # Convert second row to character column names
+  data <- data[-c(1,2), ]  # Remove first and second row since it's now the column names
+  
+  # Define which columns to rename
+  recieving_cols <- 6:13  # Adjust these indices if needed
+  rushing_cols <- 14:17
+  fumbles_cols <- 19
+  
+  # Rename columns
+  col_names[recieving_cols] <- paste0("Receiving_", col_names[recieving_cols])
+  col_names[rushing_cols] <- paste0("Rushing_", col_names[rushing_cols])
+  col_names[fumbles_cols] <- paste0("Fumbles_", col_names[fumbles_cols])
+  
+  # Assign new column names
+  colnames(data) <- col_names
+  
+  # Ensure that the columns exist before removing them
+  cols_to_remove <- c("TEAM", "POS", "FPTS")
+  cols_to_remove <- cols_to_remove[cols_to_remove %in% colnames(data)]  # Keep only existing columns
+
+  # Drop unwanted columns
+  data <- data %>% dplyr::select(-all_of(cols_to_remove))
+  
+  # Convert numeric columns back (since they become characters after renaming)
+  data <- type_convert(data)
+  
+  return(data)
+}
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+#load datasets
+qb_file <- "ProjectDataWinter2025 (QB).xlsx"
+rb_file <- "ProjectDataWinter2025 (RB).xlsx"
+wr_file <- "ProjectDataWinter2025 (WR).xlsx"
+te_file <- "ProjectDataWinter2025 (TE).xlsx"
+
+qb_sheets <- excel_sheets(qb_file)[1:4]
+rb_sheets <- excel_sheets(rb_file)[1:4]
+wr_sheets <- excel_sheets(wr_file)[1:4]
+te_sheets <- excel_sheets(te_file)[1:4]
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+#load datasets
+qb_data_list <- lapply(qb_sheets, function(sheet) read_and_clean_sheet_QB(qb_file, sheet))
+rb_data_list <- lapply(rb_sheets, function(sheet) read_and_clean_sheet_RB(rb_file, sheet))
+wr_data_list <- lapply(wr_sheets, function(sheet) read_and_clean_sheet_WR(wr_file, sheet))
+te_data_list <- lapply(te_sheets, function(sheet) read_and_clean_sheet_TE(te_file, sheet))
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+names(qb_data_list) <- qb_sheets
+names(rb_data_list) <- rb_sheets
+names(wr_data_list) <- wr_sheets
+names(te_data_list) <- te_sheets
+```
+
+#check for missing values
+I want all players to be included, so we'll impute missing values with averages
+
+```{r}
+check_null_values <- function(data, dataset_name) {
+  # Count null (NA) values in each column
+  na_counts <- colSums(is.na(data))
+  
+  # Print dataset name and the null counts per column
+  cat("\n--- Missing Values Report for", dataset_name, "---\n")
+  print(na_counts)
+  cat("\n")
+}
+```
+
+```{r}
+# Check for null values in QB datasets
+check_null_values(qb_data_list[[2]], "QB Data 2022")
+check_null_values(qb_data_list[[3]], "QB Data 2023")
+check_null_values(qb_data_list[[4]], "QB Data 2024")
+
+# Check for null values in RB datasets
+check_null_values(rb_data_list[[2]], "RB Data 2022")
+check_null_values(rb_data_list[[3]], "RB Data 2023")
+check_null_values(rb_data_list[[4]], "RB Data 2024")
+
+# Check for null values in WR datasets
+check_null_values(wr_data_list[[2]], "WR Data 2022")
+check_null_values(wr_data_list[[3]], "WR Data 2023")
+check_null_values(wr_data_list[[4]], "WR Data 2024")
+
+# Check for null values in TE datasets
+check_null_values(te_data_list[[2]], "TE Data 2022")
+check_null_values(te_data_list[[3]], "TE Data 2023")
+check_null_values(te_data_list[[4]], "TE Data 2024")
+
+```
+```{r}
+count_total_missing <- function(data, dataset_name) {
+  total_missing <- sum(is.na(data))  # Count total NAs in the dataset
+  cat("\n--- Total Missing Values for", dataset_name, ": ", total_missing, "---\n")
+  return(total_missing)  # Return the count if needed for further use
+}
+```
+```{r}
+# Apply function to all datasets
+# QB Datasets
+qb_missing_2022 <- count_total_missing(qb_data_list[[2]], "QB Data 2022")
+qb_missing_2023 <- count_total_missing(qb_data_list[[3]], "QB Data 2023")
+qb_missing_2024 <- count_total_missing(qb_data_list[[4]], "QB Data 2024")
+
+# RB Datasets
+rb_missing_2022 <- count_total_missing(rb_data_list[[2]], "RB Data 2022")
+rb_missing_2023 <- count_total_missing(rb_data_list[[3]], "RB Data 2023")
+rb_missing_2024 <- count_total_missing(rb_data_list[[4]], "RB Data 2024")
+
+# WR Datasets
+wr_missing_2022 <- count_total_missing(wr_data_list[[2]], "WR Data 2022")
+wr_missing_2023 <- count_total_missing(wr_data_list[[3]], "WR Data 2023")
+wr_missing_2024 <- count_total_missing(wr_data_list[[4]], "WR Data 2024")
+
+# TE Datasets
+te_missing_2022 <- count_total_missing(te_data_list[[2]], "TE Data 2022")
+te_missing_2023 <- count_total_missing(te_data_list[[3]], "TE Data 2023")
+te_missing_2024 <- count_total_missing(te_data_list[[4]], "TE Data 2024")
+
+```
+Some for QBs, 0s
+
+No missing data for running backs
+
+Since WR and TE rarely rush, the missing values represent 0 rushing attempts and 0 rushing yards, so we'll fill all these missing values with zeros
+
+```{r}
+# Fill missing rushing stats with 0
+te_data_list <- lapply(te_data_list, function(df) {
+  df %>%
+    mutate(across(starts_with("Rushing_"), ~replace_na(.x, 0)))
+})
+
+wr_data_list <- lapply(wr_data_list, function(df) {
+  df %>%
+    mutate(across(starts_with("Rushing_"), ~replace_na(.x, 0)))
+})
+
+replace_missing_qb <- function(data) {
+  data %>%
+    mutate(across(starts_with("Passing_"), ~replace_na(.x, 0))) %>%
+    mutate(across(starts_with("Rushing_"), ~replace_na(.x, 0)))
+}
+
+qb_data_list[[2]] <- replace_missing_qb(qb_data_list[[2]])  # QB Data 2022
+qb_data_list[[3]] <- replace_missing_qb(qb_data_list[[3]])  # QB Data 2023
+qb_data_list[[4]] <- replace_missing_qb(qb_data_list[[4]])  # QB Data 2024
+```
+
+```{r}
+#convert everything to numeric except name
+convert_numeric_except_name <- function(df) {
+  df %>%
+    mutate(across(-NAME, ~ as.numeric(.), .names = "converted_{.col}"))  # Convert everything except 'name' to numeric
+}
+
+qb_data_list <- lapply(qb_data_list, convert_numeric_except_name)
+rb_data_list <- lapply(rb_data_list, convert_numeric_except_name)
+wr_data_list <- lapply(wr_data_list, convert_numeric_except_name)
+te_data_list <- lapply(te_data_list, convert_numeric_except_name)
+```
+
+```{r}
+#clean names
+clean_names <- function(df) {
+  df %>%
+    mutate(NAME = str_trim(NAME))  # Remove leading and trailing spaces
+}
+
+qb_data_list <- lapply(qb_data_list, clean_names)
+rb_data_list <- lapply(rb_data_list, clean_names)
+wr_data_list <- lapply(wr_data_list, clean_names)
+te_data_list <- lapply(te_data_list, clean_names)
+
+```
+
+```{r}
+#count outliers
+count_outliers <- function(df, dataset_name) {
+  # Identify numeric columns only
+  numeric_cols <- df %>% dplyr::select(where(is.numeric))
+  
+  # Compute IQR for each column
+  Q1 <- numeric_cols %>% summarise(across(everything(), ~ quantile(.x, 0.25, na.rm = TRUE)))
+  Q3 <- numeric_cols %>% summarise(across(everything(), ~ quantile(.x, 0.75, na.rm = TRUE)))
+  IQR_values <- Q3 - Q1
+  
+  # Compute lower and upper bounds
+  lower_bound <- Q1 - 1.5 * IQR_values
+  upper_bound <- Q3 + 1.5 * IQR_values
+  
+  # Count outliers for each column
+  outlier_counts <- numeric_cols %>%
+    summarise(across(everything(), ~ sum(.x < lower_bound[[cur_column()]] | .x > upper_bound[[cur_column()]], na.rm = TRUE)))
+  
+  # Sum total outliers across all numeric columns
+  total_outliers <- sum(outlier_counts)
+  
+  # Return a data frame
+  return(tibble(Dataset = dataset_name, Total_Outliers = total_outliers))
+}
+
+```
+
+```{r}
+# Count outliers in each dataset
+outlier_summary <- bind_rows(
+  count_outliers(qb_data_list[[2]], "QB Data 2022"),
+  count_outliers(qb_data_list[[3]], "QB Data 2023"),
+  count_outliers(qb_data_list[[4]], "QB Data 2024"),
+  count_outliers(rb_data_list[[2]], "RB Data 2022"),
+  count_outliers(rb_data_list[[3]], "RB Data 2023"),
+  count_outliers(rb_data_list[[4]], "RB Data 2024"),
+  count_outliers(wr_data_list[[2]], "WR Data 2022"),
+  count_outliers(wr_data_list[[3]], "WR Data 2023"),
+  count_outliers(wr_data_list[[4]], "WR Data 2024"),
+  count_outliers(te_data_list[[2]], "TE Data 2022"),
+  count_outliers(te_data_list[[3]], "TE Data 2023"),
+  count_outliers(te_data_list[[4]], "TE Data 2024")
+)
+
+# Display summary table
+library(knitr)
+kable(outlier_summary, caption = "Total Outliers Per Dataset")
+
+```
+We have A LOT of outliers, we'll keep them for know because we know there wasn't errors in collecting the data, if they impact our model negatively we will address them later. We could potentially want the outliers because we want to pick the best players and our assumption is that the best players are above average.
+
+```{r}
+qb_data_2022 <- qb_data_list[[2]]
+qb_data_2023 <- qb_data_list[[3]]
+qb_data_2024 <- qb_data_list[[4]]
+
+rb_data_2022 <- rb_data_list[[2]]
+rb_data_2023 <- rb_data_list[[3]]
+rb_data_2024 <- rb_data_list[[4]]
+
+wr_data_2022 <- wr_data_list[[2]]
+wr_data_2023 <- wr_data_list[[3]]
+wr_data_2024 <- wr_data_list[[4]]
+
+te_data_2022 <- te_data_list[[2]]
+te_data_2023 <- te_data_list[[3]]
+te_data_2024 <- te_data_list[[4]]
+```
+```{r}
+library(dplyr)
+
+merge_data_2022 <- function(qb_data_2022, qb_data_2023) {
+  # Rename fpts/g and FPTS/G columns in 2023 dataset
+  qb_data_2023 <- qb_data_2023 %>%
+    rename(`2023_fpts/g` = `FPTS/G`)  # Handles case sensitivity
+  
+  # Merge with 2022 dataset on "NAME"
+  qb_combined <- qb_data_2022 %>%
+    left_join(qb_data_2023 %>% dplyr::select(NAME, `2023_fpts/g`), by = "NAME")
+  
+  return(qb_combined)
+}
+
+qb_combined_2022 <- merge_data_2022(qb_data_2022, qb_data_2023)
+rb_combined_2022 <- merge_data_2022(rb_data_2022, rb_data_2023)
+wr_combined_2022 <- merge_data_2022(wr_data_2022, wr_data_2023)
+te_combined_2022 <- merge_data_2022(te_data_2022, te_data_2023)
+```
+
+```{r}
+#rows where 2023 fpts is NA
+na_rows_qb <- qb_combined_2022 %>%
+  filter(is.na(`2023_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_qb)
+```
+we have 18 QB rows with NAs. We'll go a google search and see if we can get their statistics, but if they didn't play in 2023, then we'll delete them because their information is not helpful to us. None of these players played in 2023, so we'll delete them from our data set.
+
+```{r}
+#rows where 2023 fpts is NA
+na_rows_rb <- rb_combined_2022 %>%
+  filter(is.na(`2023_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_rb)
+```
+```{r}
+#rows where 2023 fpts is NA
+na_rows_wr <- wr_combined_2022 %>%
+  filter(is.na(`2023_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_wr)
+```
+```{r}
+#rows where 2023 fpts is NA
+na_rows_te <- te_combined_2022 %>%
+  filter(is.na(`2023_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_te)
+```
+```{r}
+#delete players who did not play in 2023
+remove_na_players <- function(qb_combined_2022, na_rows_qb) {
+  # Remove rows where NAME exists in na_rows_qb
+  qb_filtered <- qb_combined_2022 %>%
+    filter(!NAME %in% na_rows_qb$NAME)
+  
+  return(qb_filtered)
+}
+
+qb_data_2022 <- remove_na_players(qb_combined_2022, na_rows_qb)
+rb_data_2022 <- remove_na_players(rb_combined_2022, na_rows_rb)
+wr_data_2022 <- remove_na_players(wr_combined_2022, na_rows_wr)
+te_data_2022 <- remove_na_players(te_combined_2022, na_rows_te)
+```
+Now again for 2023 and 2024
+```{r}
+library(dplyr)
+
+merge_data_2023 <- function(qb_data_2023, qb_data_2024) {
+  # Rename fpts/g and FPTS/G columns in 2023 dataset
+  qb_data_2024 <- qb_data_2024 %>%
+    rename(`2024_fpts/g` = `FPTS/G`)  # Handles case sensitivity
+  
+  # Merge with 2022 dataset on "NAME"
+  qb_combined <- qb_data_2023 %>%
+    left_join(qb_data_2024 %>% dplyr::select(NAME, `2024_fpts/g`), by = "NAME")
+  
+  return(qb_combined)
+}
+
+qb_combined_2023 <- merge_data_2023(qb_data_2023, qb_data_2024)
+rb_combined_2023 <- merge_data_2023(rb_data_2023, rb_data_2024)
+wr_combined_2023 <- merge_data_2023(wr_data_2023, wr_data_2024)
+te_combined_2023 <- merge_data_2023(te_data_2023, te_data_2024)
+```
+
+```{r}
+#rows where 2023 fpts is NA
+na_rows_qb <- qb_combined_2023 %>%
+  filter(is.na(`2024_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_qb)
+```
+we have 21 QB rows with NAs. We'll go a google search and see if we can get their statistics, but if they didn't play in 2023, then we'll delete them because their information is not helpful to us. None of these players played in 2023, so we'll delete them from our data set.
+
+```{r}
+#rows where 2023 fpts is NA
+na_rows_rb <- rb_combined_2023 %>%
+  filter(is.na(`2024_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_rb)
+```
+```{r}
+#rows where 2023 fpts is NA
+na_rows_wr <- wr_combined_2023 %>%
+  filter(is.na(`2024_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_wr)
+```
+```{r}
+#rows where 2023 fpts is NA
+na_rows_te <- te_combined_2023 %>%
+  filter(is.na(`2024_fpts/g`)) %>%
+  dplyr::select(NAME)
+
+print(na_rows_te)
+```
+```{r}
+#delete players who did not play in 2023
+remove_na_players <- function(qb_combined_2022, na_rows_qb) {
+  # Remove rows where NAME exists in na_rows_qb
+  qb_filtered <- qb_combined_2022 %>%
+    filter(!NAME %in% na_rows_qb$NAME)
+  
+  return(qb_filtered)
+}
+
+qb_data_2023 <- remove_na_players(qb_combined_2023, na_rows_qb)
+rb_data_2023 <- remove_na_players(rb_combined_2023, na_rows_rb)
+wr_data_2023 <- remove_na_players(wr_combined_2023, na_rows_wr)
+te_data_2023 <- remove_na_players(te_combined_2023, na_rows_te)
+```
+
+```{r}
+colnames(qb_data_2022) <- tolower(colnames(qb_data_2022))
+colnames(qb_data_2023) <- tolower(colnames(qb_data_2023))
+colnames(qb_data_2024) <- tolower(colnames(qb_data_2024))
+
+colnames(rb_data_2022) <- tolower(colnames(rb_data_2022))
+colnames(rb_data_2023) <- tolower(colnames(rb_data_2023))
+colnames(rb_data_2024) <- tolower(colnames(rb_data_2024))
+
+colnames(wr_data_2022) <- tolower(colnames(wr_data_2022))
+colnames(wr_data_2023) <- tolower(colnames(wr_data_2023))
+colnames(wr_data_2024) <- tolower(colnames(wr_data_2024))
+
+colnames(te_data_2022) <- tolower(colnames(te_data_2022))
+colnames(te_data_2023) <- tolower(colnames(te_data_2023))
+colnames(te_data_2024) <- tolower(colnames(te_data_2024))
+```
+
+```{r}
+remove_converted_columns <- function(df) {
+  df %>%
+    dplyr::select(-starts_with("converted_"))  # Remove all columns that start with "converted_"
+}
+
+# Apply to QB datasets
+qb_data_2022 <- remove_converted_columns(qb_data_2022)
+qb_data_2023 <- remove_converted_columns(qb_data_2023)
+qb_data_2024 <- remove_converted_columns(qb_data_2024)
+
+# Apply to RB datasets
+rb_data_2022 <- remove_converted_columns(rb_data_2022)
+rb_data_2023 <- remove_converted_columns(rb_data_2023)
+rb_data_2024 <- remove_converted_columns(rb_data_2024)
+
+# Apply to WR datasets
+wr_data_2022 <- remove_converted_columns(wr_data_2022)
+wr_data_2023 <- remove_converted_columns(wr_data_2023)
+wr_data_2024 <- remove_converted_columns(wr_data_2024)
+
+# Apply to TE datasets
+te_data_2022 <- remove_converted_columns(te_data_2022)
+te_data_2023 <- remove_converted_columns(te_data_2023)
+te_data_2024 <- remove_converted_columns(te_data_2024)
+```
+
+```{r}
+#extract needed data
+library(readr)
+
+# Save QB data
+write_csv(qb_data_2022, "qb_data_2022.csv")
+write_csv(qb_data_2023, "qb_data_2023.csv")
+write_csv(qb_data_2024, "qb_data_2024.csv")
+
+# Save RB data
+write_csv(rb_data_2022, "rb_data_2022.csv")
+write_csv(rb_data_2023, "rb_data_2023.csv")
+write_csv(rb_data_2024, "rb_data_2024.csv")
+
+# Save WR data
+write_csv(wr_data_2022, "wr_data_2022.csv")
+write_csv(wr_data_2023, "wr_data_2023.csv")
+write_csv(wr_data_2024, "wr_data_2024.csv")
+
+# Save TE data
+write_csv(te_data_2022, "te_data_2022.csv")
+write_csv(te_data_2023, "te_data_2023.csv")
+write_csv(te_data_2024, "te_data_2024.csv")
+```
+
+
+
+
+

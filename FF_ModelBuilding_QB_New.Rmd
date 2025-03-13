@@ -1,0 +1,1304 @@
+---
+title: "FF_ModelBuilding"
+author: "2d Lt Lyssa White"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(caret)
+library(ggplot2)
+library(xlsx)
+library(dplyr)
+library(tidyr)
+library(car)        # For VIF (Variance Inflation Factor)
+library(leaps)      # For stepwise selection
+library(MASS)       # For stepwise AIC/BIC
+library(caret) 
+library(knitr)
+library(kableExtra)
+library(corrplot)
+library(reshape2)
+library(MuMIn)
+```
+
+```{r}
+qb_data_2022 <- read.csv("qb_data_2022.csv")
+qb_data_2023 <- read.csv("qb_data_2023.csv")
+```
+
+```{r}
+qb_data_2022 <- qb_data_2022 %>%
+    rename(`2023_fpts/g` = `X2023_fpts.g`)
+qb_data_2023 <- qb_data_2023 %>%
+    rename(`2024_fpts/g` = `X2024_fpts.g`)
+```
+
+Now we build our models. Let's start with quarterback
+
+Since we know that rank is directly correlated with the average number of fantasy points per season for each of our players, we'll remove rank from the data. If we leave it in there could be high multicollinearity between rank and fantasy points per season which could result in unstable coefficients, inflated variance of coefficients, and decreased statistical significance. We'll choose to keep average fantasy points per season for the previous season here because this predictor is already standardized and is more specific than rank. We expect there to be multicollinearity present between other variables as well, since we know some of our metrics are calculated using the metrics provided. For example, in the quarterback dataset, passing completion percentage is calculated using passes completed and passes attempted, which are both also variables in the dataset. Since it isn't clear which variables will be better predictors, this concern will be addressed with a multicollinearity assessment later on. Name was also removed at this point to maintain only numeric regressors for the linear regression model.
+
+```{r}
+#remove rank and name from 2022 data
+qb_data_2022 <- qb_data_2022 %>% dplyr::select(-c("rk"))
+```
+# Initial Model & All Possible Regressions
+
+We'll use all data to run the all possible regressions, and then use K fold cross validation on the top candidate models.
+```{r}
+standardize_data <- function(df) {
+  numeric_cols <- df %>% dplyr::select(where(is.numeric)) %>% names()
+  
+  means <- df %>% summarise(across(all_of(numeric_cols), mean, na.rm = TRUE)) 
+  sds <- df %>% summarise(across(all_of(numeric_cols), sd, na.rm = TRUE))  
+  
+  scaled_df <- df %>%
+    mutate(across(all_of(numeric_cols), ~ (. - means[[cur_column()]]) / sds[[cur_column()]]))
+  
+  attr(scaled_df, "means") <- means
+  attr(scaled_df, "sds") <- sds
+  
+  return(scaled_df)
+}
+
+qb_data_2022 <- standardize_data(qb_data_2022)
+```
+
+
+Run QB full model and analyze p values to determine which variables to remove
+
+```{r}
+qb_full_model <- lm(`2023_fpts/g` ~ gp + passing_cmp +passing_att+passing_cmp.+passing_yds+passing_pass.avg+passing_td+passing_int+passing_rating+rushing_att+rushing_yds+rushing_avg+rushing_td+fpts.g, data = qb_data_2022)
+summary(qb_full_model)
+```
+```{r}
+coef(qb_full_model)
+```
+
+check normality
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals <- rstudent(qb_full_model)
+fitted_values <- fitted(qb_full_model)
+```
+```{r, echo=FALSE}
+qqnorm(rstudent_residuals, main = "QB Normal Probability Plot")
+qqline(rstudent_residuals, col="red", lwd=2)
+```
+We see that our residuals are mostly aligned with our reference line. This indicates that our residuals are distributed approximately normal. Next, let's look at a residual plot.
+
+```{r, echo=FALSE}
+plot(fitted_values, rstudent_residuals, xlab = "Fitted Values", ylab = "Residuals", main="QB Fitted Values vs R Student Residuals")
+abline(h=0, col="red", lty=2)
+```
+We see from this residual plot that there is a random scattering of our residuals around the zero line, and they seem to be contained within a horizontal band. This tells us that our variance of errors is constant and our data appears to be linear. Now let's look at the residuals vs each of our regressor values.
+
+```{r, echo=FALSE}
+selected_regressors <- c("gp", "passing_cmp", "passing_att", "passing_cmp.", "passing_yds", "passing_pass.avg", "passing_td", "passing_int", "passing_rating", "rushing_att", "rushing_yds", "rushing_avg", "rushing_td", "fpts.g")
+
+for (regressor in selected_regressors) {
+  plot(qb_data_2022[[regressor]], rstudent_residuals,
+       main = paste("R-Student Residuals vs ", regressor),
+       xlab = regressor,
+       ylab = "Residuals")
+  abline(h=0, col="red", lty=2)
+}
+```
+GP: random scattering
+passing_cmp: random scattering, less points on the right but we expect less QBs to have higher passes completed
+passing_att: same as above
+passing_cmp.: some variability clustering but overall random
+passing_yds: same as passing_att
+passing_pass.avg: rnadom
+passing_td: random scattering
+Passing_int: random scattering
+passing_rating: random scattering
+rushing_att: random scattering
+rushing_yds: execute log transformation
+rushing_avg: random scattering, one obvious potential outliers on the right
+rushing_td: discrete values but we'll call it random scattering; maybe consider as a categorical variable?
+fpts.g: amazing random scattering
+
+These random scatterings confirm our assumption that the relationship between the selected regressors and $y$ is respectively linear. However, rushing yards- is highly skewed to the right, so we execute a log transformation.
+```{r}
+qb_data_2022$log_rushing_yds <- log(qb_data_2022$rushing_yds + 1)
+qb_data_2022$log_rushing_yds <- log(qb_data_2022$rushing_yds + 1)
+
+replace_invalid_values <- function(df) {
+  df %>%
+    mutate(across(where(is.numeric), ~ ifelse(is.infinite(.x) | is.nan(.x), 0, .x)))
+}
+
+qb_data_2022 <- replace_invalid_values(qb_data_2022)
+```
+```{r}
+plot(qb_data_2022[["log_rushing_yds"]], rstudent_residuals,
+     main = paste("R-Student Residuals vs ", "log_rushing_yds"),
+     xlab = "log_rushing_yds",
+     ylab = "Residuals")
+abline(h=0, col="red", lty=2)
+```
+Influential Obs
+Next we'll look at any pure outliers, leverage points, and influential points in our data. We'll evaluate hat values, Cook's D values, DFBETA values, DFFITS values and COVRATIO values.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+hat_values = hatvalues(qb_full_model)
+cooks_d = cooks.distance(qb_full_model)
+dfbetas_values <- as.data.frame(dfbetas(qb_full_model))
+dffits = dffits(qb_full_model)
+covratio = covratio(qb_full_model)
+```
+```{r, echo=FALSE, warning=FALSE}
+results_df <- data.frame(
+  "QB" = qb_data_2022$name,
+  "Studentized Residuals" = rstudent_residuals,
+  "Hat Values" = hat_values,
+  "Cooks D Values" = cooks_d,
+  "DFBETA Values" = dfbetas_values,
+  "DFFITS Values" = dffits,
+  "COVRATIO Values" = covratio
+)
+
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), round, digits = 4))
+
+
+kable(results_df, caption = "Regression Diagnostics Table", align="c", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position", "centering"))
+```
+
+Now let's identify what those thresholds are for our model.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+p <- 14
+n <- nrow(qb_data_2022)
+
+hat <- (2*p)/n
+dffits_val <- 2*sqrt(p/n)
+dfbetas_vals <- 2/sqrt(n)
+covratio_val1 <- 1 - (3*p)/n
+covratio_val2 <- 1 + (3*p)/n
+```
+
+```{r, echo=FALSE}
+influence_metrics2 <- data.frame(
+  Metric = c("Studentized Residuals (R-Student)", 
+             "Hat Values", 
+             "Cook’s Distance", 
+             "DFFITS", 
+             "DFBETAs", 
+             "COVRATIO"),
+
+  Threshold = c(
+    ">|2|, >|3|",
+    round(hat, 4), 
+    "> 1", 
+    round(dffits_val, 4),
+    round(dfbetas_vals, 4),
+    paste("<", round(covratio_val1,4), "or >", round(covratio_val2,4))
+  )
+)
+
+kable(influence_metrics2, caption = "Influence Metrics Thresholds Based on NFL Data") 
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+results_df$`Studentized.Residuals` <- as.numeric(results_df$`Studentized.Residuals`)
+results_df$`Hat.Values` <- as.numeric(results_df$`Hat.Values`)
+results_df$`Cooks.D.Values` <- as.numeric(results_df$`Cooks.D.Values`)
+results_df$`DFFITS.Values` <- as.numeric(results_df$`DFFITS.Values`)
+results_df$`DFBETA.Values.gp` <- as.numeric(results_df$`DFBETA.Values.gp`)
+results_df$`DFBETA.Values.passing_cmp` <- as.numeric(results_df$`DFBETA.Values.passing_cmp`)
+results_df$`DFBETA.Values.passing_att` <- as.numeric(results_df$`DFBETA.Values.passing_att`)
+results_df$`DFBETA.Values.passing_cmp.` <- as.numeric(results_df$`DFBETA.Values.passing_cmp.`)
+results_df$`DFBETA.Values.passing_yds` <- as.numeric(results_df$`DFBETA.Values.passing_yds`)
+results_df$`DFBETA.Values.passing_pass.avg` <- as.numeric(results_df$`DFBETA.Values.passing_pass.avg`)
+results_df$`DFBETA.Values.passing_td` <- as.numeric(results_df$`DFBETA.Values.passing_td`)
+results_df$`DFBETA.Values.passing_int` <- as.numeric(results_df$`DFBETA.Values.passing_int`)
+results_df$`DFBETA.Values.passing_rating` <- as.numeric(results_df$`DFBETA.Values.passing_rating`)
+results_df$`DFBETA.Values.rushing_att` <- as.numeric(results_df$`DFBETA.Values.rushing_att`)
+results_df$`DFBETA.Values.rushing_yds` <- as.numeric(results_df$`DFBETA.Values.rushing_yds`)
+results_df$`DFBETA.Values.rushing_avg` <- as.numeric(results_df$`DFBETA.Values.rushing_avg`)
+results_df$`DFBETA.Values.rushing_td` <- as.numeric(results_df$`DFBETA.Values.rushing_td`)
+results_df$`DFBETA.Values.fpts.g` <- as.numeric(results_df$`DFBETA.Values.fpts.g`)
+results_df$`COVRATIO.Values` <- as.numeric(results_df$`COVRATIO.Values`)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+outlier_rows <- list(
+  "Studentized Residuals" = which(abs(results_df$`Studentized.Residuals`) > 3),
+  "Hat Values" = which(results_df$`Hat.Values` > round(hat, 4)),
+  "Cook’s Distance" = which(results_df$`Cooks.D.Values` > 1),
+  "DFFITS" = which(abs(results_df$`DFFITS.Values`) > round(dffits_val, 4)),
+  "DFBETAs" = which(abs(results_df$`DFBETA.Values.gp`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_cmp`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_att`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_cmp.`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_yds`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_pass.avg`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_td`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_int`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_rating`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.rushing_att`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.rushing_yds`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.rushing_avg`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.rushing_td`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.fpts.g`) > round(dfbetas_vals, 4)),
+  "COVRATIO" = which(results_df$`COVRATIO.Values` < round(covratio_val1,4) | 
+                     results_df$`COVRATIO.Values` > round(covratio_val2,4))
+)
+
+# Display rows for each metric
+print(outlier_rows)
+```
+Since DFBETAS and COVRATIO don't tell us much on their own, we'll only look at rows that have at least one other irregular flag.
+
+```{r}
+studentized_residuals <- integer(0)
+hat_values <- c(3,6,11,56,59,62,64,65)
+cooks_distance <- integer(0)  # Empty
+dffits <- c(3,12,18,55,59,62,65)
+
+dfbetas <- c(3,4,9,12,15,18,19,20,27,30,31,36,37,39,40,45,50,52,55,56,59,60,62,65)
+
+covratio <- c(1, 2, 3, 4, 5, 7, 10, 11,12, 13, 14,16,22,49,56,63,64,65)
+```
+```{r}
+all_indices <- sort(unique(c(studentized_residuals, hat_values, dffits)))
+dfbetas_filtered <- dfbetas[dfbetas %in% all_indices]
+covratio_filtered <- covratio[covratio %in% all_indices]
+```
+```{r}
+df <- data.frame(
+  Index = all_indices,
+  Studentized_Residuals = ifelse(all_indices %in% studentized_residuals, "✓", ""),
+  Hat_Values = ifelse(all_indices %in% hat_values, "✓", ""),
+  DFFITS = ifelse(all_indices %in% dffits, "✓", ""),
+  DFBETAs = ifelse(all_indices %in% dfbetas_filtered, "✓", ""),
+  COVRATIO = ifelse(all_indices %in% covratio_filtered, "✓", "")
+)
+
+print(df)
+```
+```{r}
+df %>%
+  kable(format = "pipe", align = "c") %>%
+  kable_styling(full_width = FALSE)
+```
+We have 11 flagged points all together.
+6 appearing in 3 or more categories
+
+Indices with high studentized residuals have unusually large errors compared to the rest of the model. Indices with irregular hat values have high leverage and could influence the regression fit. Indices with irregular DFFITS values are influential points that might change the model significantly. Indices with irregular DFBETAS values cause bias in parameter estimated. Indices with irregular COVRATIO values may increase the standard errors of the coefficients.
+
+We'll identify the most problmatic observations as those that appear in at least three categories. Since these are genuine observations and not data entry errors, we're going to choose to keep them. They represent real variation in the dataset, and removing them may limit the generalizability of the model. In addition, players that represent outliers on the higher end, may be exactly what we're looking for. Our goal is prediction and these outliers represent real world cases so we'll keep them. They may aslo be the result of regressors in the model that don't end up being important, or, they may be exacerbated by the regressors that are inportant. We'll keep them in mind and ensure to check them in our final models.
+
+multicollinearity
+check correlation matrix for pairwise collinearity
+```{r, echo=FALSE}
+cor_matrix <- cor(qb_data_2022[, selected_regressors], use = "pairwise.complete.obs")
+#print(cor_matrix)
+kable(cor_matrix, digits = 2, format = "markdown", caption="NFL Data Correlation Matrix")
+```
+```{r, echo=FALSE}
+cor_melt <- melt(cor_matrix)
+
+high_corr <- cor_melt %>%
+  filter(value > 0.75 & value < 1) %>%
+  arrange(desc(value))
+
+high_corr <- high_corr %>%
+  rowwise() %>%
+  mutate(pair = paste0(sort(c(Var1, Var2)), collapse = "-")) %>%  # Sort pairs
+  distinct(pair, .keep_all = TRUE) %>%
+  dplyr::select(-pair)
+
+kable(high_corr, digits = 2, format = "markdown", caption = "Highly Correlated Regressor Pairs")
+```
+Lots of highly correlated pairs, let's see if we can identify groups that are highly collinear.
+
+```{r, echo=FALSE}
+eigenvalues <- eigen(cor_matrix)$values
+kable(data.frame(Eigenvalues = round(eigenvalues, 4)), format = "markdown", caption="Eigenvalues for NFL Data")
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+eigen_decomp <- eigen(cor_matrix)
+eigenvectors <- eigen_decomp$vectors
+smallest_eigenvector <- eigenvectors[, which.min(eigen_decomp$values)]
+
+print(smallest_eigenvector)
+```
+$0.0535gp +0.6132passing_cmp - 0.7650passing_att -0.0036Passing_cmp. +0.1417passing_yds-0.0042passing_pass.avg-0.0715passing_td+0.0361passing_int-0.0023passing_rating-0.0744rushing_att+0.0556rushing_yds-0.0051rushing_avg+0.0049rushing_td+0.0226fpts.g \ approx0$
+
+$0.6132passing_cmp - 0.7650passing_att+0.1417passing_yds \approx 0$
+
+$0.6132passing_cmp - 0.7650passing_att+0.1417passing_yds \approx 0$
+
+passing_cmp can be written as a linear combo of passes attempted and passing yds, so we expect to only need passes completed in the model.
+
+```{r}
+vif(qb_full_model)
+```
+those three variables also have our highest VIF values, so we'll ensure all three aren't in the final model. Now let's run all possible regressions.
+
+```{r}
+qb_full_model_log <- lm(`2023_fpts/g` ~ gp + passing_cmp +passing_att+passing_cmp.+passing_yds+passing_pass.avg+passing_td+passing_int+passing_rating+rushing_att+log_rushing_yds+rushing_avg+rushing_td+fpts.g, data = qb_data_2022, na.action="na.fail")
+```
+```{r}
+compute_press <- function(model) {
+  residuals <- residuals(model)
+  hat_values <- hatvalues(model)
+  
+  # Avoid division by zero for leverage = 1
+  hat_values[hat_values == 1] <- 0.9999
+  
+  press_residuals <- sum((residuals / (1 - hat_values))^2, na.rm = TRUE)  # PRESS
+  return(press_residuals)
+}
+```
+
+```{r}
+combinations <- dredge(qb_full_model_log, extra = c(R_Sq = function(x) summary(x)$r.squared,
+R_Sq_Adj = function(x) summary(x)$adj.r.squared, MS_Res = function(x) summary(x)$sigma^2, Cp,
+MallowCp = function(x) summary(x)$sigma^2*df.residual(x)/summary(qb_full_model_log)$sigma^2
+-dim(qb_data_2022)[1]+2*length(x$coefficients), PRESS=compute_press))
+```
+```{r}
+print(xtable(combinations), scalebox=0.75)
+```
+
+```{r}
+kable(
+  combinations %>%
+    head(10) %>%  # Select first 10 rows
+    mutate(across(where(is.numeric), ~ round(.x, 3))),  # Round numeric columns
+  format = "markdown",
+  digits = 3,
+  caption = "All Possible Regressions"
+) %>%
+  kable_styling(full_width = FALSE)  # Ensure it fits on the page
+```
+```{r}
+# Add a column to store original model numbers
+combinations <- combinations %>%
+  mutate(Model_Number = rownames(combinations)) 
+combinations %>% head(10)
+```
+
+
+
+```{r}
+# Select top 10 models while keeping model number
+clean_combinations <- combinations %>%
+  head(20) %>%  # Select first 10 rows
+  mutate(across(where(is.numeric), ~ round(.x, 3)))  # Round numeric columns
+
+# Sort models by Mallows Cp and adjusted R^2 while retaining original model numbers
+table_mallowscp <- combinations %>%
+  arrange(MallowCp)
+
+table_adj_r2 <- combinations %>%
+  arrange(desc(R_Sq_Adj))
+
+table_press <- combinations[order(combinations$PRESS), ] 
+
+# Display Top 10 Models Sorted by Mallows Cp
+kable(
+  table_mallowscp %>%
+    head(10) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 3))),  # Round to 3 decimals
+  format = "markdown",
+  digits = 3,
+  caption = "Top 10 Models Sorted by Mallows Cp Statistic"
+) %>%
+  kable_styling(full_width = FALSE)
+
+# Display Top 10 Models Sorted by Adjusted R^2
+kable(
+  table_adj_r2 %>%
+    head(10) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 3))),  # Round to 3 decimals
+  format = "markdown",
+  digits = 3,
+  caption = "Top 10 Models Sorted by Adjusted R^2"
+) %>%
+  kable_styling(full_width = FALSE)
+
+# Display Top 10 Models Sorted by Adjusted R^2
+kable(
+  table_press %>%
+    head(10) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 3))),  # Round to 3 decimals
+  format = "markdown",
+  digits = 3,
+  caption = "Top 10 Models Sorted by PRESS"
+) %>%
+  kable_styling(full_width = FALSE)
+```
+
+258, 2, 2306 have both the best Mallow's CP and PRESS values. 2306 and 2818 have the highest adjusted R^2 so well look at 2818 too. We'll add 2817 as Model E.
+
+```{r}
+model_A <- lm(`2023_fpts/g` ~ fpts.g + passing_rating, data = qb_data_2022)
+model_B <- lm(`2023_fpts/g` ~ fpts.g, data = qb_data_2022)
+model_C <- lm(`2023_fpts/g` ~ fpts.g + passing_rating + rushing_att, data = qb_data_2022)
+model_D <- lm(`2023_fpts/g` ~ rushing_att+passing_rating+fpts.g+passing_td, data = qb_data_2022)
+model_E <- lm(`2023_fpts/g` ~ passing_rating+passing_td+rushing_att, data=qb_data_2022)
+```
+
+# Model Adequacy
+summaries
+
+what's strongly significant, what's borderline, stronger reasons now for including the terms; Mallow's CP, Adj R^2, take p values with a grain of salt
+```{r}
+sum_A <- summary(model_A)
+sum_B <- summary(model_B)
+sum_C <- summary(model_C)
+sum_D <- summary(model_D)
+sum_E <- summary(model_E)
+sum_A
+```
+fpts.g is strongly significant, gp is borderline. that's okay, we have different metrics we're looking at, overall the model is significant
+
+```{r}
+sum_B
+```
+fpts.g is strongly significant. passing_att and passing_rating are borderline significant but again thats okay, still overall significant.
+
+```{r}
+sum_C
+```
+```{r}
+sum_D
+```
+```{r}
+sum_E
+```
+
+
+VIFs: center maybe? best regressors in spite of collinearity
+```{r}
+vifs_A <- vif(model_A)
+#vifs_B <- vif(model_B)
+vifs_C <- vif(model_C)
+vifs_D <- vif(model_D)
+vifs_E <- vif(model_E)
+vifs_A
+#vifs_B
+vifs_C
+vifs_D
+vifs_E
+```
+All below 5, that's great
+```{r}
+# Convert VIF results to data frames
+df_A <- data.frame(Variable = names(vifs_A), VIF = vifs_A, Model = "A")
+df_B <- data.frame(Variable = names(vifs_B), VIF = vifs_B, Model = "B")
+df_C <- data.frame(Variable = names(vifs_C), VIF = vifs_C, Model = "C")
+df_D <- data.frame(Variable = names(vifs_D), VIF = vifs_D, Model = "D")
+df_E <- data.frame(Variable = names(vifs_E), VIF = vifs_E, Model = "E")
+
+# Combine all VIFs into a single table
+vif_table <- bind_rows(df_A, df_B, df_C, df_D) %>%
+  arrange(Variable, Model)  # Sort for better readability
+
+# Print table using kable
+kable(
+  vif_table,
+  format = "markdown",
+  digits = 3,
+  caption = "Variance Inflation Factors for Models A, B, C, and D"
+) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+```
+Normal PP and residual plots
+Model A
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals_A <- rstudent(model_A)
+fitted_values_A <- fitted(model_A)
+```
+```{r, echo=FALSE}
+qqnorm(rstudent_residuals_A, main = "Model A: QB Normal Probability Plot")
+qqline(rstudent_residuals_A, col="red", lwd=2)
+```
+```{r, echo=FALSE}
+plot(fitted_values_A, rstudent_residuals_A, xlab = "Fitted Values", ylab = "Residuals", main="Model A: QB Fitted Values vs R Student Residuals")
+abline(h=0, col="red", lty=2)
+```
+```{r, echo=FALSE}
+selected_regressors <- c("gp", "fpts.g")
+
+for (regressor in selected_regressors) {
+  plot(qb_data_2022[[regressor]], rstudent_residuals_A,
+       main = paste("Model A: R-Student Residuals vs ", regressor),
+       xlab = regressor,
+       ylab = "Residuals")
+  abline(h=0, col="red", lty=2)
+}
+```
+
+Model B
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals_B <- rstudent(model_B)
+fitted_values_B <- fitted(model_B)
+```
+```{r, echo=FALSE}
+qqnorm(rstudent_residuals_B, main = "Model B: QB Normal Probability Plot")
+qqline(rstudent_residuals_B, col="red", lwd=2)
+```
+```{r, echo=FALSE}
+plot(fitted_values_B, rstudent_residuals_B, xlab = "Fitted Values", ylab = "Residuals", main="Model B: QB Fitted Values vs R Student Residuals")
+abline(h=0, col="red", lty=2)
+```
+```{r, echo=FALSE}
+selected_regressors <- c("passing_att", "fpts.g", "passing_rating")
+
+for (regressor in selected_regressors) {
+  plot(qb_data_2022[[regressor]], rstudent_residuals_B,
+       main = paste("Model B: R-Student Residuals vs ", regressor),
+       xlab = regressor,
+       ylab = "Residuals")
+  abline(h=0, col="red", lty=2)
+}
+```
+Model C
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals_C <- rstudent(model_C)
+fitted_values_C <- fitted(model_C)
+```
+```{r, echo=FALSE}
+qqnorm(rstudent_residuals_C, main = "Model C: QB Normal Probability Plot")
+qqline(rstudent_residuals_C, col="red", lwd=2)
+```
+```{r, echo=FALSE}
+plot(fitted_values_C, rstudent_residuals_C, xlab = "Fitted Values", ylab = "Residuals", main="Model C: QB Fitted Values vs R Student Residuals")
+abline(h=0, col="red", lty=2)
+```
+```{r, echo=FALSE}
+selected_regressors <- c("passing_att", "fpts.g")
+
+for (regressor in selected_regressors) {
+  plot(qb_data_2022[[regressor]], rstudent_residuals_C,
+       main = paste("Model C: R-Student Residuals vs ", regressor),
+       xlab = regressor,
+       ylab = "Residuals")
+  abline(h=0, col="red", lty=2)
+}
+```
+Model D
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals_D <- rstudent(model_D)
+fitted_values_D <- fitted(model_D)
+```
+```{r, echo=FALSE}
+qqnorm(rstudent_residuals_D, main = "Model D: QB Normal Probability Plot")
+qqline(rstudent_residuals_D, col="red", lwd=2)
+```
+```{r, echo=FALSE}
+plot(fitted_values_D, rstudent_residuals_D, xlab = "Fitted Values", ylab = "Residuals", main="Model D: QB Fitted Values vs R Student Residuals")
+abline(h=0, col="red", lty=2)
+```
+```{r, echo=FALSE}
+selected_regressors <- c("passing_cmp", "fpts.g", "passing_rating")
+
+for (regressor in selected_regressors) {
+  plot(qb_data_2022[[regressor]], rstudent_residuals_D,
+       main = paste("Model D: R-Student Residuals vs ", regressor),
+       xlab = regressor,
+       ylab = "Residuals")
+  abline(h=0, col="red", lty=2)
+}
+```
+Model E
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals_E <- rstudent(model_E)
+fitted_values_E <- fitted(model_E)
+```
+```{r, echo=FALSE}
+qqnorm(rstudent_residuals_E, main = "Model E: QB Normal Probability Plot")
+qqline(rstudent_residuals_E, col="red", lwd=2)
+```
+```{r, echo=FALSE}
+plot(fitted_values_E, rstudent_residuals_E, xlab = "Fitted Values", ylab = "Residuals", main="Model E: QB Fitted Values vs R Student Residuals")
+abline(h=0, col="red", lty=2)
+```
+```{r, echo=FALSE}
+selected_regressors <- c("gp", "fpts.g")
+
+for (regressor in selected_regressors) {
+  plot(qb_data_2022[[regressor]], rstudent_residuals_E,
+       main = paste("Model E: R-Student Residuals vs ", regressor),
+       xlab = regressor,
+       ylab = "Residuals")
+  abline(h=0, col="red", lty=2)
+}
+```
+problem children - all models are wrong, some models are useful
+Model A
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals = rstudent(model_A)
+hat_values = hatvalues(model_A)
+cooks_d = cooks.distance(model_A)
+dfbetas_values <- as.data.frame(dfbetas(model_A))
+dffits = dffits(model_A)
+covratio = covratio(model_A)
+```
+```{r, echo=FALSE, warning=FALSE}
+results_df <- data.frame(
+  "QB" = qb_data_2022$name,
+  "Studentized Residuals" = rstudent_residuals,
+  "Hat Values" = hat_values,
+  "Cooks D Values" = cooks_d,
+  "DFBETA Values" = dfbetas_values,
+  "DFFITS Values" = dffits,
+  "COVRATIO Values" = covratio
+)
+
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), round, digits = 4))
+
+
+kable(results_df, caption = "Model A: Regression Diagnostics Table", align="c", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position", "centering"))
+```
+
+Now let's identify what those thresholds are for our model.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+p <- 3
+n <- nrow(qb_data_2022)
+
+hat <- (2*p)/n
+dffits_val <- 2*sqrt(p/n)
+dfbetas_vals <- 2/sqrt(n)
+covratio_val1 <- 1 - (3*p)/n
+covratio_val2 <- 1 + (3*p)/n
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+results_df$`Studentized.Residuals` <- as.numeric(results_df$`Studentized.Residuals`)
+results_df$`Hat.Values` <- as.numeric(results_df$`Hat.Values`)
+results_df$`Cooks.D.Values` <- as.numeric(results_df$`Cooks.D.Values`)
+results_df$`DFFITS.Values` <- as.numeric(results_df$`DFFITS.Values`)
+results_df$`DFBETA.Values.passing_rating` <- as.numeric(results_df$`DFBETA.Values.passing_rating`)
+results_df$`DFBETA.Values.fpts.g` <- as.numeric(results_df$`DFBETA.Values.fpts.g`)
+results_df$`COVRATIO.Values` <- as.numeric(results_df$`COVRATIO.Values`)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+outlier_rows <- list(
+  "Studentized Residuals" = which(abs(results_df$`Studentized.Residuals`) > 3),
+  "Hat Values" = which(results_df$`Hat.Values` > round(hat, 4)),
+  "Cook’s Distance" = which(results_df$`Cooks.D.Values` > 1),
+  "DFFITS" = which(abs(results_df$`DFFITS.Values`) > round(dffits_val, 4)),
+  "DFBETAs" = which(abs(results_df$`DFBETA.Values.passing_rating`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.fpts.g`) > round(dfbetas_vals, 4)),
+  "COVRATIO" = which(results_df$`COVRATIO.Values` < round(covratio_val1,4) | 
+                     results_df$`COVRATIO.Values` > round(covratio_val2,4))
+)
+
+# Display rows for each metric
+print(outlier_rows)
+```
+Since DFBETAS and COVRATIO don't tell us much on their own, we'll only look at rows that have at least one other irregular flag.
+```{r}
+studentized_residuals <- integer(0)
+hat_values <- c(52,54,55,59,64,65,66)
+cooks_distance <- integer(0)  # Empty
+dffits <- c(52,55,59,66)
+dfbetas <- c(2,52,54,55,59,66)
+
+covratio <- c(1,3,12,39,59,64,65,66)
+```
+```{r}
+all_indices <- sort(unique(c(studentized_residuals, hat_values, dffits)))
+dfbetas_filtered <- dfbetas[dfbetas %in% all_indices]
+covratio_filtered <- covratio[covratio %in% all_indices]
+```
+```{r}
+df <- data.frame(
+  Index = all_indices,
+  Studentized_Residuals = ifelse(all_indices %in% studentized_residuals, "✓", ""),
+  Hat_Values = ifelse(all_indices %in% hat_values, "✓", ""),
+  DFFITS = ifelse(all_indices %in% dffits, "✓", ""),
+  DFBETAs = ifelse(all_indices %in% dfbetas_filtered, "✓", ""),
+  COVRATIO = ifelse(all_indices %in% covratio_filtered, "✓", "")
+)
+
+print(df)
+```
+```{r}
+df %>%
+  kable(format = "pipe", align = "c") %>%
+  kable_styling(full_width = FALSE)
+```
+only 4 with 3 or more
+
+Model B
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals = rstudent(model_B)
+hat_values = hatvalues(model_B)
+cooks_d = cooks.distance(model_B)
+dfbetas_values <- as.data.frame(dfbetas(model_B))
+dffits = dffits(model_B)
+covratio = covratio(model_B)
+```
+```{r, echo=FALSE, warning=FALSE}
+results_df <- data.frame(
+  "QB" = qb_data_2022$name,
+  "Studentized Residuals" = rstudent_residuals,
+  "Hat Values" = hat_values,
+  "Cooks D Values" = cooks_d,
+  "DFBETA Values" = dfbetas_values,
+  "DFFITS Values" = dffits,
+  "COVRATIO Values" = covratio
+)
+
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), round, digits = 4))
+
+
+kable(results_df, caption = "Model A: Regression Diagnostics Table", align="c", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position", "centering"))
+```
+
+Now let's identify what those thresholds are for our model.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+p <- 2
+n <- nrow(qb_data_2022)
+
+hat <- (2*p)/n
+dffits_val <- 2*sqrt(p/n)
+dfbetas_vals <- 2/sqrt(n)
+covratio_val1 <- 1 - (3*p)/n
+covratio_val2 <- 1 + (3*p)/n
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+results_df$`Studentized.Residuals` <- as.numeric(results_df$`Studentized.Residuals`)
+results_df$`Hat.Values` <- as.numeric(results_df$`Hat.Values`)
+results_df$`Cooks.D.Values` <- as.numeric(results_df$`Cooks.D.Values`)
+results_df$`DFFITS.Values` <- as.numeric(results_df$`DFFITS.Values`)
+results_df$`DFBETA.Values.fpts.g` <- as.numeric(results_df$`DFBETA.Values.fpts.g`)
+results_df$`COVRATIO.Values` <- as.numeric(results_df$`COVRATIO.Values`)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+outlier_rows <- list(
+  "Studentized Residuals" = which(abs(results_df$`Studentized.Residuals`) > 3),
+  "Hat Values" = which(results_df$`Hat.Values` > round(hat, 4)),
+  "Cook’s Distance" = which(results_df$`Cooks.D.Values` > 1),
+  "DFFITS" = which(abs(results_df$`DFFITS.Values`) > round(dffits_val, 4)),
+  "DFBETAs" = which(
+                    abs(results_df$`DFBETA.Values.fpts.g`) > round(dfbetas_vals, 4)),
+  "COVRATIO" = which(results_df$`COVRATIO.Values` < round(covratio_val1,4) | 
+                     results_df$`COVRATIO.Values` > round(covratio_val2,4))
+)
+
+# Display rows for each metric
+print(outlier_rows)
+```
+Since DFBETAS and COVRATIO don't tell us much on their own, we'll only look at rows that have at least one other irregular flag.
+```{r}
+studentized_residuals <- integer(0)
+hat_values <- c(1,2,3,66)
+cooks_distance <- integer(0)  # Empty
+dffits <- c(52,55)
+
+dfbetas <- c(52,54,55)
+
+covratio <- c(1,2,3,12,55,65,66)
+```
+```{r}
+all_indices <- sort(unique(c(studentized_residuals, hat_values, dffits)))
+dfbetas_filtered <- dfbetas[dfbetas %in% all_indices]
+covratio_filtered <- covratio[covratio %in% all_indices]
+```
+```{r}
+df <- data.frame(
+  Index = all_indices,
+  Studentized_Residuals = ifelse(all_indices %in% studentized_residuals, "✓", ""),
+  Hat_Values = ifelse(all_indices %in% hat_values, "✓", ""),
+  DFFITS = ifelse(all_indices %in% dffits, "✓", ""),
+  DFBETAs = ifelse(all_indices %in% dfbetas_filtered, "✓", ""),
+  COVRATIO = ifelse(all_indices %in% covratio_filtered, "✓", "")
+)
+
+print(df)
+```
+```{r}
+df %>%
+  kable(format = "pipe", align = "c") %>%
+  kable_styling(full_width = FALSE)
+```
+1 with 3 or more
+
+Model C
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals = rstudent(model_C)
+hat_values = hatvalues(model_C)
+cooks_d = cooks.distance(model_C)
+dfbetas_values <- as.data.frame(dfbetas(model_C))
+dffits = dffits(model_C)
+covratio = covratio(model_C)
+```
+```{r, echo=FALSE, warning=FALSE}
+results_df <- data.frame(
+  "QB" = qb_data_2022$name,
+  "Studentized Residuals" = rstudent_residuals,
+  "Hat Values" = hat_values,
+  "Cooks D Values" = cooks_d,
+  "DFBETA Values" = dfbetas_values,
+  "DFFITS Values" = dffits,
+  "COVRATIO Values" = covratio
+)
+
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), round, digits = 4))
+
+
+kable(results_df, caption = "Model A: Regression Diagnostics Table", align="c", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position", "centering"))
+```
+
+Now let's identify what those thresholds are for our model.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+p <- 4
+n <- nrow(qb_data_2022)
+
+hat <- (2*p)/n
+dffits_val <- 2*sqrt(p/n)
+dfbetas_vals <- 2/sqrt(n)
+covratio_val1 <- 1 - (3*p)/n
+covratio_val2 <- 1 + (3*p)/n
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+results_df$`Studentized.Residuals` <- as.numeric(results_df$`Studentized.Residuals`)
+results_df$`Hat.Values` <- as.numeric(results_df$`Hat.Values`)
+results_df$`Cooks.D.Values` <- as.numeric(results_df$`Cooks.D.Values`)
+results_df$`DFFITS.Values` <- as.numeric(results_df$`DFFITS.Values`)
+results_df$`DFBETA.Values.passing_rating` <- as.numeric(results_df$`DFBETA.Values.passing_rating`)
+results_df$`DFBETA.Values.rushing_att` <- as.numeric(results_df$`DFBETA.Values.rushing_att`)
+results_df$`DFBETA.Values.fpts.g` <- as.numeric(results_df$`DFBETA.Values.fpts.g`)
+results_df$`COVRATIO.Values` <- as.numeric(results_df$`COVRATIO.Values`)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+outlier_rows <- list(
+  "Studentized Residuals" = which(abs(results_df$`Studentized.Residuals`) > 3),
+  "Hat Values" = which(results_df$`Hat.Values` > round(hat, 4)),
+  "Cook’s Distance" = which(results_df$`Cooks.D.Values` > 1),
+  "DFFITS" = which(abs(results_df$`DFFITS.Values`) > round(dffits_val, 4)),
+  "DFBETAs" = which(
+                    abs(results_df$`DFBETA.Values.passing_rating`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.rushing_att`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.fpts.g`) > round(dfbetas_vals, 4)),
+  "COVRATIO" = which(results_df$`COVRATIO.Values` < round(covratio_val1,4) | 
+                     results_df$`COVRATIO.Values` > round(covratio_val2,4))
+)
+
+# Display rows for each metric
+print(outlier_rows)
+```
+Since DFBETAS and COVRATIO don't tell us much on their own, we'll only look at rows that have at least one other irregular flag.
+```{r}
+studentized_residuals <- integer(0)
+hat_values <- c(3,6,50,55,59,64,66)
+cooks_distance <- integer(0)  # Empty
+dffits <- c(37,55,66)
+
+dfbetas <- c(9,19,37,39,40,52,54,55,59,66)
+
+covratio <- c(3,6,12,39,50,64,66)
+```
+```{r}
+all_indices <- sort(unique(c(studentized_residuals, hat_values, dffits)))
+dfbetas_filtered <- dfbetas[dfbetas %in% all_indices]
+covratio_filtered <- covratio[covratio %in% all_indices]
+```
+```{r}
+df <- data.frame(
+  Index = all_indices,
+  Studentized_Residuals = ifelse(all_indices %in% studentized_residuals, "✓", ""),
+  Hat_Values = ifelse(all_indices %in% hat_values, "✓", ""),
+  DFFITS = ifelse(all_indices %in% dffits, "✓", ""),
+  DFBETAs = ifelse(all_indices %in% dfbetas_filtered, "✓", ""),
+  COVRATIO = ifelse(all_indices %in% covratio_filtered, "✓", "")
+)
+
+print(df)
+```
+```{r}
+df %>%
+  kable(format = "pipe", align = "c") %>%
+  kable_styling(full_width = FALSE)
+```
+2 with 3 or more
+
+Model D
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals = rstudent(model_D)
+hat_values = hatvalues(model_D)
+cooks_d = cooks.distance(model_D)
+dfbetas_values <- as.data.frame(dfbetas(model_D))
+dffits = dffits(model_D)
+covratio = covratio(model_D)
+```
+```{r, echo=FALSE, warning=FALSE}
+results_df <- data.frame(
+  "QB" = qb_data_2022$name,
+  "Studentized Residuals" = rstudent_residuals,
+  "Hat Values" = hat_values,
+  "Cooks D Values" = cooks_d,
+  "DFBETA Values" = dfbetas_values,
+  "DFFITS Values" = dffits,
+  "COVRATIO Values" = covratio
+)
+
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), round, digits = 4))
+
+
+kable(results_df, caption = "Model A: Regression Diagnostics Table", align="c", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position", "centering"))
+```
+
+Now let's identify what those thresholds are for our model.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+p <- 5
+n <- nrow(qb_data_2022)
+
+hat <- (2*p)/n
+dffits_val <- 2*sqrt(p/n)
+dfbetas_vals <- 2/sqrt(n)
+covratio_val1 <- 1 - (3*p)/n
+covratio_val2 <- 1 + (3*p)/n
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+results_df$`Studentized.Residuals` <- as.numeric(results_df$`Studentized.Residuals`)
+results_df$`Hat.Values` <- as.numeric(results_df$`Hat.Values`)
+results_df$`Cooks.D.Values` <- as.numeric(results_df$`Cooks.D.Values`)
+results_df$`DFFITS.Values` <- as.numeric(results_df$`DFFITS.Values`)
+results_df$`DFBETA.Values.passing_td` <- as.numeric(results_df$`DFBETA.Values.passing_td`)
+results_df$`DFBETA.Values.passing_rating` <- as.numeric(results_df$`DFBETA.Values.passing_rating`)
+results_df$`DFBETA.Values.rushing_att` <- as.numeric(results_df$`DFBETA.Values.rushing_att`)
+results_df$`DFBETA.Values.fpts.g` <- as.numeric(results_df$`DFBETA.Values.fpts.g`)
+results_df$`COVRATIO.Values` <- as.numeric(results_df$`COVRATIO.Values`)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+outlier_rows <- list(
+  "Studentized Residuals" = which(abs(results_df$`Studentized.Residuals`) > 3),
+  "Hat Values" = which(results_df$`Hat.Values` > round(hat, 4)),
+  "Cook’s Distance" = which(results_df$`Cooks.D.Values` > 1),
+  "DFFITS" = which(abs(results_df$`DFFITS.Values`) > round(dffits_val, 4)),
+  "DFBETAs" = which(
+                    abs(results_df$`DFBETA.Values.passing_td`) > round(dfbetas_vals, 4) |
+                    
+                    abs(results_df$`DFBETA.Values.passing_rating`) > round(dfbetas_vals, 4) |
+                    
+                    abs(results_df$`DFBETA.Values.rushing_att`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.fpts.g`) > round(dfbetas_vals, 4)),
+  "COVRATIO" = which(results_df$`COVRATIO.Values` < round(covratio_val1,4) | 
+                     results_df$`COVRATIO.Values` > round(covratio_val2,4))
+)
+
+# Display rows for each metric
+print(outlier_rows)
+```
+Since DFBETAS and COVRATIO don't tell us much on their own, we'll only look at rows that have at least one other irregular flag.
+```{r}
+studentized_residuals <- integer(0)
+hat_values <- c(1,3,6,50,64,66)
+cooks_distance <- integer(0)  # Empty
+dffits <- c(12,37,50,55,66)
+
+dfbetas <- c(9,12,19,33,37,39,40,48,50,52,54,55,59,66)
+
+covratio <- c(1,3,6,12,39,50,64,66)
+```
+```{r}
+all_indices <- sort(unique(c(studentized_residuals, hat_values, dffits)))
+dfbetas_filtered <- dfbetas[dfbetas %in% all_indices]
+covratio_filtered <- covratio[covratio %in% all_indices]
+```
+```{r}
+df <- data.frame(
+  Index = all_indices,
+  Studentized_Residuals = ifelse(all_indices %in% studentized_residuals, "✓", ""),
+  Hat_Values = ifelse(all_indices %in% hat_values, "✓", ""),
+  DFFITS = ifelse(all_indices %in% dffits, "✓", ""),
+  DFBETAs = ifelse(all_indices %in% dfbetas_filtered, "✓", ""),
+  COVRATIO = ifelse(all_indices %in% covratio_filtered, "✓", "")
+)
+
+print(df)
+```
+```{r}
+df %>%
+  kable(format = "pipe", align = "c") %>%
+  kable_styling(full_width = FALSE)
+```
+3 in three or more
+
+Model E
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+rstudent_residuals = rstudent(model_E)
+hat_values = hatvalues(model_E)
+cooks_d = cooks.distance(model_E)
+dfbetas_values <- as.data.frame(dfbetas(model_E))
+dffits = dffits(model_E)
+covratio = covratio(model_E)
+```
+```{r, echo=FALSE, warning=FALSE}
+results_df <- data.frame(
+  "QB" = qb_data_2022$name,
+  "Studentized Residuals" = rstudent_residuals,
+  "Hat Values" = hat_values,
+  "Cooks D Values" = cooks_d,
+  "DFBETA Values" = dfbetas_values,
+  "DFFITS Values" = dffits,
+  "COVRATIO Values" = covratio
+)
+
+results_df <- results_df %>%
+  mutate(across(where(is.numeric), round, digits = 4))
+
+
+kable(results_df, caption = "Model A: Regression Diagnostics Table", align="c", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position", "centering"))
+```
+
+Now let's identify what those thresholds are for our model.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+p <- 4
+n <- nrow(qb_data_2022)
+
+hat <- (2*p)/n
+dffits_val <- 2*sqrt(p/n)
+dfbetas_vals <- 2/sqrt(n)
+covratio_val1 <- 1 - (3*p)/n
+covratio_val2 <- 1 + (3*p)/n
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+results_df$`Studentized.Residuals` <- as.numeric(results_df$`Studentized.Residuals`)
+results_df$`Hat.Values` <- as.numeric(results_df$`Hat.Values`)
+results_df$`Cooks.D.Values` <- as.numeric(results_df$`Cooks.D.Values`)
+results_df$`DFFITS.Values` <- as.numeric(results_df$`DFFITS.Values`)
+results_df$`DFBETA.Values.passing_rating` <- as.numeric(results_df$`DFBETA.Values.passing_rating`)
+results_df$`DFBETA.Values.passing_td` <- as.numeric(results_df$`DFBETA.Values.passing_td`)
+results_df$`DFBETA.Values.rushing_att` <- as.numeric(results_df$`DFBETA.Values.rushing_att`)
+results_df$`COVRATIO.Values` <- as.numeric(results_df$`COVRATIO.Values`)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+outlier_rows <- list(
+  "Studentized Residuals" = which(abs(results_df$`Studentized.Residuals`) > 3),
+  "Hat Values" = which(results_df$`Hat.Values` > round(hat, 4)),
+  "Cook’s Distance" = which(results_df$`Cooks.D.Values` > 1),
+  "DFFITS" = which(abs(results_df$`DFFITS.Values`) > round(dffits_val, 4)),
+  "DFBETAs" = which(abs(results_df$`DFBETA.Values.passing_rating`) > round(dfbetas_vals, 4) |
+                      abs(results_df$`DFBETA.Values.rushing_att`) > round(dfbetas_vals, 4) |
+                    abs(results_df$`DFBETA.Values.passing_td`) > round(dfbetas_vals, 4)),
+  "COVRATIO" = which(results_df$`COVRATIO.Values` < round(covratio_val1,4) | 
+                     results_df$`COVRATIO.Values` > round(covratio_val2,4))
+)
+
+# Display rows for each metric
+print(outlier_rows)
+```
+Since DFBETAS and COVRATIO don't tell us much on their own, we'll only look at rows that have at least one other irregular flag.
+```{r}
+studentized_residuals <- integer(0)
+hat_values <- c(1,2,3,6,9,64,66)
+cooks_distance <- integer(0)  # Empty
+dffits <- c(12,55)
+dfbetas <- c(8,9,12,13,19,55,59,66)
+
+covratio <- c(1,2,3,6,12,39,64,65,66)
+```
+```{r}
+all_indices <- sort(unique(c(studentized_residuals, hat_values, dffits)))
+dfbetas_filtered <- dfbetas[dfbetas %in% all_indices]
+covratio_filtered <- covratio[covratio %in% all_indices]
+```
+```{r}
+df <- data.frame(
+  Index = all_indices,
+  Studentized_Residuals = ifelse(all_indices %in% studentized_residuals, "✓", ""),
+  Hat_Values = ifelse(all_indices %in% hat_values, "✓", ""),
+  DFFITS = ifelse(all_indices %in% dffits, "✓", ""),
+  DFBETAs = ifelse(all_indices %in% dfbetas_filtered, "✓", ""),
+  COVRATIO = ifelse(all_indices %in% covratio_filtered, "✓", "")
+)
+
+print(df)
+```
+```{r}
+df %>%
+  kable(format = "pipe", align = "c") %>%
+  kable_styling(full_width = FALSE)
+```
+only 2 with 3 or more
+
+
+
+
+Accuracy Checking
+unscale
+```{r}
+undo_standardization <- function(df, original_train_data) {
+  means <- attr(original_train_data, "means") %>% as.list() %>% unlist()  # Convert to named vector
+  sds <- attr(original_train_data, "sds") %>% as.list() %>% unlist()  # Convert to named vector
+
+  numeric_cols <- df %>% dplyr::select(where(is.numeric)) %>% names()  # Select only numeric columns
+
+  df %>%
+    mutate(across(all_of(numeric_cols), ~ . * sds[cur_column()] + means[cur_column()]))
+}
+
+qb_data_2022 <- undo_standardization(qb_data_2022, qb_data_2022)
+```
+
+report mallows, press, adj r sq, number of problem children in 3 or more
+
+# Model Validation - k fold cross validation
+```{r}
+k_folds = 5
+
+#set up cross fold
+set.seed(24)
+folds <- createFolds(qb_data_2022$`2023_fpts/g`, k = k_folds, list = TRUE)
+
+#intialize results df
+cv_results <- data.frame(Model = character(), RMSE = numeric(), R2 = numeric(), PRESS = numeric(), R2_pred = numeric(), stringsAsFactors = FALSE)
+
+#establish candidate models
+candidate_models <- list(ModelA = `2023_fpts/g` ~ fpts.g + passing_rating,
+                         ModelB = `2023_fpts/g` ~ fpts.g,
+                         ModelC = `2023_fpts/g` ~ fpts.g + passing_rating + rushing_att,
+                         ModelD = `2023_fpts/g` ~ fpts.g + passing_td + rushing_att + passing_rating,
+                         ModelE = `2023_fpts/g` ~ passing_td + rushing_att + passing_rating)
+
+
+#loop through
+for (i in seq_along(candidate_models)) {
+  
+  #model formula
+  model_formula <- candidate_models[[i]]
+  
+  #result vectors
+  rmse_values <- c()
+  r2_values <- c()
+  press_values <- c()
+
+  for (j in seq_along(folds)) {
+    #split
+    test_indices <- folds[[j]]
+    train_data <- qb_data_2022[-test_indices, ]
+    test_data <- qb_data_2022[test_indices, ]
+    
+    #only numeric
+    numeric_cols <- train_data %>%
+      dplyr::select(where(is.numeric)) %>%
+      dplyr::select(-`2023_fpts/g`) %>%  # Exclude target variable
+      colnames()
+    
+    #standardize train
+    train_mean <- train_data %>%
+      summarise(across(all_of(numeric_cols), mean, na.rm = TRUE))
+    
+    train_sd <- train_data %>%
+      summarise(across(all_of(numeric_cols), sd, na.rm = TRUE))
+    
+    train_data_std <- train_data %>%
+      mutate(across(all_of(numeric_cols), ~ (. - train_mean[[cur_column()]]) / train_sd[[cur_column()]]))
+    
+    #standardize test
+    test_mean <- test_data %>%
+      summarise(across(all_of(numeric_cols), mean, na.rm = TRUE))
+    
+    test_sd <- test_data %>%
+      summarise(across(all_of(numeric_cols), sd, na.rm = TRUE))
+    
+    test_data_std <- test_data %>%
+      mutate(across(all_of(numeric_cols), ~ (. - test_mean[[cur_column()]]) / test_sd[[cur_column()]]))
+    
+    #train model
+    model <- lm(model_formula, data = train_data_std)
+    
+    #predict
+    predictions_std <- predict(model, test_data_std)
+
+    #unstandardize
+    y_mean <- mean(test_data$`2023_fpts/g`)
+    y_sd <- sd(test_data$`2023_fpts/g`)
+    
+    predictions <- (predictions_std * y_sd) + y_mean  # Reverse transformation
+    
+    #compute RMSE and R^2
+    rmse <- sqrt(mean((test_data$`2023_fpts/g` - predictions)^2))
+    r2 <- cor(test_data$`2023_fpts/g`, predictions)^2
+    
+    #compute PRESS
+    press_values <- compute_press(model)
+    
+    #store values
+    rmse_values <- c(rmse_values, rmse)
+    r2_values <- c(r2_values, r2)
+  }
+  
+  #compute SST (Total Sum of Squares) for entire dataset
+  SST <- sum((qb_data_2022$`2023_fpts/g` - mean(qb_data_2022$`2023_fpts/g`))^2)
+  
+  #compute mean PRESS and R2_pred
+  mean_PRESS <- mean(press_values)
+  R2_pred <- 1 - (mean_PRESS / SST)
+  
+  #store mean cross-validated RMSE, R2, PRESS, and R2_pred for this model
+  cv_results <- rbind(cv_results, data.frame(
+    Model = as.character(deparse(model_formula)),  # Convert formula properly
+    RMSE = mean(rmse_values),
+    R2 = mean(r2_values),
+    PRESS = mean_PRESS,
+    R2_pred = R2_pred
+))
+
+}
+
+#sort models by rmse
+cv_results <- cv_results[order(cv_results$RMSE), ]
+
+print(cv_results)
+```
+```{r}
+coef(model_A)
+coef(model_B)
+coef(model_C)
+coef(model_D)
+coef(model_E)
+```
+
+# Predictions
+Apply to 2023 data and save predictions and rankings
+selecting model A
+```{r}
+qb_data_2023 <- read.csv("qb_data_2023.csv")
+```
+```{r}
+qb_data_2023$predicted_fpts_2024 <- predict(model_B, newdata = qb_data_2023)
+print(qb_data_2023$predicted_fpts_2024)
+```
+```{r}
+qb_predictions <- qb_data_2023 %>%
+  dplyr::select(name, `X2024_fpts.g`, predicted_fpts_2024) %>%
+  mutate(position="QB")
+
+head(qb_predictions)
+```
+Check accuracy for fun??
+```{r}
+write.csv(qb_predictions, "qb_predictions.csv", row.names = FALSE)
+```
